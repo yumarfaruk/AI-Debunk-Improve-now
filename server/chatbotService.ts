@@ -13,7 +13,7 @@ export interface WebhookLogEvent {
   direction: 'incoming' | 'outgoing';
   senderId: string;
   incomingText: string;
-  mediaType?: 'text' | 'audio' | 'video';
+  mediaType?: 'text' | 'audio' | 'video' | 'image';
   replyText?: string;
   verdict?: string;
   credibilityScore?: number;
@@ -55,10 +55,11 @@ export function formatChatbotResponse(result: DebunkResult, platform: 'whatsapp'
   const italic = (txt: string) => (isWhatsApp ? `_${txt}_` : `"${txt}"`);
 
   let emojiVerdict = '🔍';
-  if (result.verdict === 'Disinformation') emojiVerdict = '🚨';
-  else if (result.verdict === 'Misinformation') emojiVerdict = '⚠️';
+  if (result.verdict === 'Disinformation') emojiVerdict = '🔴 🚨';
+  else if (result.verdict === 'Misinformation') emojiVerdict = '🟡 ⚠️';
   else if (result.verdict === 'Malinformation') emojiVerdict = '🛑';
-  else if (result.verdict === 'Verified True') emojiVerdict = '✅';
+  else if (result.verdict === 'Verified True') emojiVerdict = '🟢 ✅';
+  else if (result.verdict === 'Unverified — insufficient evidence') emojiVerdict = '🟡 🔎';
 
   const redFlagsList = result.redFlags && result.redFlags.length > 0
     ? result.redFlags.map((rf) => `• ${rf}`).join('\n')
@@ -84,6 +85,14 @@ export function formatChatbotResponse(result: DebunkResult, platform: 'whatsapp'
 • Deepfake Risk: ${vf.deepfakeRisk}
 • Visual Markers: ${vf.visualMarkers.join(', ')}
 • Archival Check: ${vf.archivalFootageCheck}
+`;
+  } else if (result.mediaType === 'image' && result.mediaDetails?.imageForensics) {
+    const imf = result.mediaDetails.imageForensics;
+    mediaForensicsSection = `
+🖼️ ${bold('Image & Screenshot Forensic Analysis:')}
+• Manipulation Risk: ${imf.manipulationRisk}
+• Visual Markers: ${imf.visualMarkers.join(', ')}
+${imf.extractedTextOrOcr ? `• Text Detected (OCR): ${imf.extractedTextOrOcr.slice(0, 180)}\n` : ''}• Context Check: ${imf.contextVerification}
 `;
   }
 
@@ -111,6 +120,70 @@ ${ea.peaceAndTensionImpact}
 `;
   }
 
+  let fimiSection = '';
+  if (result.fimiAnalysis?.isFimiRisk) {
+    const fimi = result.fimiAnalysis;
+    const topCase = fimi.matchingDocumentedCases?.[0];
+    fimiSection = `
+🌍 ${bold('FOREIGN INTERFERENCE (FIMI) ALERT:')}
+• Risk Level: ${fimi.fimiRiskLevel} (${fimi.fimiCategory})
+• Foreign Networks / Actors: ${fimi.foreignActorsOrNetworks.join(', ')}
+${topCase ? `• Documented Nigeria Precedent: ${topCase.caseTitle} (${topCase.year})\n  Source: ${topCase.documentedSource}` : ''}
+• Outside Geopolitical Goal: ${fimi.geopoliticalObjective}
+• Sovereignty Advisory: ${fimi.sovereigntyImpact}
+• How to Protect Yourself: ${fimi.counterMeasure}
+`;
+  }
+
+  let urlVetSection = '';
+  if (result.urlVetReport?.hasLinks && result.urlVetReport.analyzedUrls.length > 0) {
+    const topTarget = result.urlVetReport.analyzedUrls[0];
+    const isPhish = topTarget.safetyVerdict === 'MALICIOUS_PHISHING';
+    const isSafe = topTarget.safetyVerdict === 'OFFICIAL_SAFE';
+    const safetyIcon = isPhish ? '🚨' : isSafe ? '✅' : '⚠️';
+    urlVetSection = `
+🛡️ ${bold('URL.VET LINK SECURITY & PHISHING SCAN:')}
+• Inspected Link: ${topTarget.rawUrl}
+• Normalized Domain: ${topTarget.normalizedDomain}
+• Safety Verdict: ${safetyIcon} ${topTarget.safetyVerdict.replace('_', ' ')} (Safety Score: ${topTarget.safetyScore}/100)
+• Threat Classification: ${topTarget.threatType}
+${topTarget.impersonatedEntity ? `• Impersonated Entity: ${topTarget.impersonatedEntity}\n` : ''}• Domain Age & Infrastructure: ${topTarget.domainAgeEstimate}
+• Hosting Location: ${topTarget.hostingCountry}
+• url.vet Security Advice: ${topTarget.actionRecommendation}
+`;
+  }
+
+  let localGapSection = '';
+  if (result.localEvidenceGapAnalysis) {
+    const gap = result.localEvidenceGapAnalysis;
+    const indicatorEmoji =
+      gap.indicatorColor === 'green' ? '🟢' : gap.indicatorColor === 'red' ? '🔴' : '🟡';
+    const missingList =
+      gap.missingEvidence.length > 0
+        ? gap.missingEvidence
+            .slice(0, 3)
+            .map((m) => `• ${m.label}`)
+            .join('\n')
+        : '• No critical local evidence gaps detected';
+    const nextStepList = gap.recommendedVerificationSteps
+      .slice(0, 3)
+      .map((s) => `• ${s.channel}: ${s.action}`)
+      .join('\n');
+
+    localGapSection = `
+🧭 ${bold('LOCAL EVIDENCE GAP ANALYSIS:')}
+• Status: ${indicatorEmoji} ${gap.indicatorLabel}
+• Language / Scope: ${gap.detectedLanguage} • ${gap.geographicFocus}
+• Evidence Confidence: ${gap.confidenceAssessment.evidenceConfidenceScore}/100 (${gap.confidenceAssessment.evidenceConfidenceLabel})
+• Verdict Confidence: ${gap.confidenceAssessment.verdictConfidenceScore}/100 (${gap.confidenceAssessment.verdictConfidenceLabel})
+• Evidence Gaps:
+${missingList}
+• Recommended Next Steps:
+${nextStepList}
+• Epistemic Note: ${gap.epistemicConclusion}
+`;
+  }
+
   const replyToShare = result.isNigerianElection && result.electionDepthAnalysis?.nigerianContextReply
     ? result.electionDepthAnalysis.nigerianContextReply
     : result.easyReply;
@@ -126,15 +199,15 @@ ${result.summary}
 
 ${bold('🔎 Verified Reality:')}
 ${result.factualReality}
-${electionSection}${cibSection}
-${bold('🚩 Red Flags Found:')}
+${localGapSection}${electionSection}${fimiSection}${cibSection}${urlVetSection}
+${bold('🚩 Key Signals / Flags:')}
 ${redFlagsList}
 
 ━━━━━━━━━━━━━━━━━━
 ${bold('💬 Copy & Send to WhatsApp/Family Groups:')}
 ${italic(replyToShare)}
 
-${italic('🛡️ Verify before you share • Powered by Gemma 4 • Send any voice note, video, or viral post anytime to check!')}`;
+${italic('🛡️ Verify before you share • Powered by Gemma 4 • Send any image, voice note, video, or viral post anytime to check!')}`;
 }
 
 /**
@@ -240,7 +313,7 @@ export async function handleMetaWebhookPayload(body: any): Promise<{
 
     const sender = message.from;
     let incomingText = '';
-    let mediaType: 'text' | 'audio' | 'video' = 'text';
+    let mediaType: 'text' | 'audio' | 'video' | 'image' = 'text';
 
     if (message.type === 'text') {
       incomingText = message.text?.body?.trim() || '';
@@ -250,6 +323,9 @@ export async function handleMetaWebhookPayload(body: any): Promise<{
     } else if (message.type === 'video') {
       mediaType = 'video';
       incomingText = message.video?.caption || 'Video clip forwarded: Polling unit voting incident.';
+    } else if (message.type === 'image') {
+      mediaType = 'image';
+      incomingText = message.image?.caption || 'Image forwarded: Screenshot or Form EC8A election result sheet.';
     }
 
     if (!incomingText) {
@@ -299,14 +375,31 @@ export async function handleMetaWebhookPayload(body: any): Promise<{
   if (body?.object === 'page' || body?.entry?.[0]?.messaging) {
     const messaging = body.entry?.[0]?.messaging?.[0];
     const sender = messaging?.sender?.id;
-    const incomingText = messaging?.message?.text?.trim() || '';
+    const attachmentType = messaging?.message?.attachments?.[0]?.type;
+    const mediaType: 'text' | 'audio' | 'video' | 'image' =
+      attachmentType === 'image'
+        ? 'image'
+        : attachmentType === 'audio'
+        ? 'audio'
+        : attachmentType === 'video'
+        ? 'video'
+        : 'text';
+    const incomingText =
+      messaging?.message?.text?.trim() ||
+      (mediaType === 'image'
+        ? 'Image attachment forwarded: Screenshot or graphic for verification.'
+        : mediaType === 'audio'
+        ? 'Audio attachment forwarded for verification.'
+        : mediaType === 'video'
+        ? 'Video attachment forwarded for verification.'
+        : '');
 
     if (!sender || !incomingText) {
       return { handled: false };
     }
 
     try {
-      const debunkResult = await analyzeClaim(incomingText);
+      const debunkResult = await analyzeClaim(incomingText, undefined, mediaType);
       const replyText = formatChatbotResponse(debunkResult, 'facebook');
 
       const isDelivered = await sendFacebookMessage(sender, replyText);
@@ -316,6 +409,7 @@ export async function handleMetaWebhookPayload(body: any): Promise<{
         direction: 'incoming',
         senderId: sender,
         incomingText,
+        mediaType,
         replyText,
         verdict: debunkResult.verdict,
         credibilityScore: debunkResult.credibilityScore,

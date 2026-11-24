@@ -9,6 +9,7 @@ import {
   getActiveProviderConfig,
   REALISTIC_SAMPLE_CLAIM,
   NIGERIAN_ELECTION_SAMPLES,
+  DOCUMENTED_NIGERIA_FIMI_CASES,
 } from './server/debunkService.ts';
 
 import {
@@ -24,9 +25,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = parseInt(process.env.PORT || '3000', 10);
+let port = parseInt(process.env.PORT || '3000', 10);
+const portArgIndex = process.argv.indexOf('--port');
+if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+  port = parseInt(process.argv[portArgIndex + 1], 10);
+}
 
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 // API Routes
 app.get('/api/provider-info', (req, res) => {
@@ -48,10 +53,71 @@ app.get('/api/election-samples', (req, res) => {
   res.json({ samples: NIGERIAN_ELECTION_SAMPLES });
 });
 
+app.get('/api/fimi-cases', (req, res) => {
+  res.json({ cases: DOCUMENTED_NIGERIA_FIMI_CASES });
+});
+
+interface UserFeedback {
+  id: string;
+  category: string;
+  suggestion: string;
+  author?: string;
+  rating?: number;
+  timestamp: string;
+}
+
+const communityFeedbackList: UserFeedback[] = [
+  {
+    id: 'fb-1',
+    category: 'Local Nigerian Languages',
+    suggestion: 'Add Nigerian Pidgin, Hausa, Yoruba, and Igbo translation for voice note debunking so grassroots community members can understand immediately.',
+    author: 'Civic Technologist, Lagos',
+    rating: 5,
+    timestamp: new Date(Date.now() - 3600000 * 24).toISOString(),
+  },
+  {
+    id: 'fb-2',
+    category: 'Offline / USSD & SMS',
+    suggestion: 'Provide an offline SMS or USSD code verification for rural polling units where 4G data networks might be throttled or unavailable on election day.',
+    author: 'Election Observer, Kano',
+    rating: 5,
+    timestamp: new Date(Date.now() - 3600000 * 12).toISOString(),
+  },
+  {
+    id: 'fb-3',
+    category: 'INEC Polling Unit Search',
+    suggestion: 'Allow citizens to paste their PU code (e.g., 24-08-01-002) to verify if a viral incident report actually happened in their registered polling unit.',
+    author: 'Voter, Abuja',
+    rating: 4,
+    timestamp: new Date(Date.now() - 3600000 * 4).toISOString(),
+  },
+];
+
+app.get('/api/feedback', (req, res) => {
+  res.json({ feedback: communityFeedbackList });
+});
+
+app.post('/api/feedback', (req, res) => {
+  const { category, suggestion, author, rating } = req.body || {};
+  if (!suggestion || !suggestion.trim()) {
+    return res.status(400).json({ error: 'Please enter a suggestion.' });
+  }
+  const item: UserFeedback = {
+    id: `fb-${Date.now()}`,
+    category: category || 'General Suggestion',
+    suggestion: suggestion.trim(),
+    author: author?.trim() || 'Community Member',
+    rating: Number(rating) || 5,
+    timestamp: new Date().toISOString(),
+  };
+  communityFeedbackList.unshift(item);
+  res.json({ success: true, feedback: item });
+});
+
 app.post('/api/analyze', async (req, res) => {
   try {
-    const { text, provider, mediaType = 'text' } = req.body || {};
-    const result = await analyzeClaim(text, provider, mediaType);
+    const { text, provider, mediaType = 'text', imageData } = req.body || {};
+    const result = await analyzeClaim(text || '', provider, mediaType, imageData);
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Analysis failed' });
@@ -116,21 +182,23 @@ app.post('/api/webhook', handleWebhookPost);
 // Interactive Chatbot Simulation Endpoint
 app.post('/api/chat/simulate', async (req, res) => {
   try {
-    const { message, platform = 'whatsapp', provider, mediaType = 'text' } = req.body || {};
-    if (!message || !message.trim()) {
-      res.status(400).json({ error: 'Message cannot be empty.' });
+    const { message, platform = 'whatsapp', provider, mediaType = 'text', imageData } = req.body || {};
+    const hasImage = Boolean(imageData && imageData.data);
+    if ((!message || !message.trim()) && !hasImage) {
+      res.status(400).json({ error: 'Message or image cannot be empty.' });
       return;
     }
 
-    const debunkResult = await analyzeClaim(message, provider, mediaType);
+    const effectiveMediaType = hasImage && mediaType === 'text' ? 'image' : mediaType;
+    const debunkResult = await analyzeClaim(message || '', provider, effectiveMediaType, imageData);
     const formattedReply = formatChatbotResponse(debunkResult, platform);
 
     addWebhookLog({
       platform: platform as 'whatsapp' | 'facebook',
       direction: 'incoming',
       senderId: platform === 'whatsapp' ? '+234 803 123 4567' : 'fb_user_10284',
-      incomingText: message,
-      mediaType,
+      incomingText: (message && message.trim()) || `[Uploaded Image${imageData?.fileName ? `: ${imageData.fileName}` : ''}]`,
+      mediaType: effectiveMediaType,
       replyText: formattedReply,
       verdict: debunkResult.verdict,
       credibilityScore: debunkResult.credibilityScore,
@@ -184,7 +252,15 @@ app.post('/api/webhook/test-ping', async (req, res) => {
                       id: `wamid_${Date.now()}`,
                       timestamp: Math.floor(Date.now() / 1000).toString(),
                       text: { body: testText },
-                      type: mediaType === 'audio' ? 'audio' : mediaType === 'video' ? 'video' : 'text',
+                      type:
+                        mediaType === 'audio'
+                          ? 'audio'
+                          : mediaType === 'video'
+                          ? 'video'
+                          : mediaType === 'image'
+                          ? 'image'
+                          : 'text',
+                      ...(mediaType === 'image' ? { image: { caption: testText } } : {}),
                     },
                   ],
                 },
@@ -228,20 +304,26 @@ app.post('/api/webhook/test-ping', async (req, res) => {
   }
 });
 
-// Serve static frontend build if present
-const distPath = path.resolve(__dirname, 'dist');
-app.use(express.static(distPath));
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
 
-app.get('*', (req, res) => {
-  const indexHtml = path.join(distPath, 'index.html');
-  res.sendFile(indexHtml, (err) => {
-    if (err) {
-      res.status(200).send('DebunkAI Server is running. Run `npm run build` to compile the frontend.');
-    }
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`DebunkAI server listening on http://0.0.0.0:${port}`);
+    console.log(`Provider: ${process.env.PROVIDER || 'api'}`);
   });
-});
+}
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`DebunkAI server listening on http://0.0.0.0:${port}`);
-  console.log(`Provider: ${process.env.PROVIDER || 'api'}`);
-});
+startServer();
